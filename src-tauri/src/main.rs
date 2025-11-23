@@ -197,11 +197,17 @@ fn run_ai_analysis(image_b64: String) -> Result<String, String> {
 
     // --- PASS FILE PATH TO PYTHON ---
     let output = Command::new(&python_path)
-        .arg(&script)
-        .arg(input_path.to_string_lossy().to_string()) // <-- file path
-        .arg(&model)
-        .output()
-        .map_err(|e| format!("Failed to run AI script: {}", e))?;
+    .arg(&script)
+    .arg(input_path.to_string_lossy().to_string())
+    .arg(&model)
+
+    // 🔥 PASS ENV VARS TO PYTHON DIRECTLY
+    .env("GMAPS_KEY", std::env::var("GMAPS_TILE_KEY").unwrap_or_default())
+    .env("BING_KEY",  std::env::var("BING_TILE_KEY").unwrap_or_default())
+
+    .output()
+    .map_err(|e| format!("Failed to run AI script: {}", e))?;
+
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
