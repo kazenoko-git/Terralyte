@@ -1,5 +1,7 @@
+// src/App.tsx — Fully patched & safe version
 import { useState } from "react";
 import { invoke } from "@tauri-apps/api/core";
+
 import Sidebar from "./components/Sidebar";
 import MapPicker from "./components/MapPicker";
 import ResultsView, { AiResult, SiteMeta } from "./components/ResultsView";
@@ -15,37 +17,53 @@ type View = "select" | "results";
 
 export default function App() {
   const [showSplash, setShowSplash] = useState(true);
+
   const [lat, setLat] = useState(12.8604075);
   const [lon, setLon] = useState(77.6625644);
+
   const [view, setView] = useState<View>("select");
   const [loading, setLoading] = useState(false);
+
   const [imageSrc, setImageSrc] = useState<string | null>(null);
   const [overlayImageSrc, setOverlayImageSrc] = useState<string | null>(null);
+
   const [siteMeta, setSiteMeta] = useState<SiteMeta | null>(null);
   const [aiResult, setAiResult] = useState<AiResult | null>(null);
 
+  // Splash screen first
   if (showSplash) {
     return <SplashScreen onComplete={() => setShowSplash(false)} />;
   }
 
+  // ================================
+  //         MAIN ANALYSIS
+  // ================================
   const handleAnalyze = async ({ zoom, radius, provider }: FetchParams) => {
     setLoading(true);
     console.log("Start AI analysis:", { lat, lon, zoom, radius, provider });
 
     try {
-      // 1) Fetch stitched tile AND CROP IT
+      // -------------------------------------
+      // 1) FETCH TILE & CENTER CROP
+      // -------------------------------------
       const stitchedTile = await invoke<string>("fetch_and_crop_tile", {
         lat,
         lon,
         zoom,
         radius,
         provider,
+        crop_center: true,
+        crop_size: 512,
       });
 
-      console.log("Cropped tile data URL length:", stitchedTile?.length || 0);
+      if (!stitchedTile) throw new Error("Tile fetch returned empty.");
+
+      console.log("Fetched + cropped tile OK. Length:", stitchedTile.length);
       setImageSrc(stitchedTile);
 
-      // 2) Build site metadata
+      // -------------------------------------
+      // 2) BUILD METADATA OBJECT
+      // -------------------------------------
       const meta: SiteMeta = {
         sample_id: `${Date.now()}`,
         lat,
@@ -54,48 +72,69 @@ export default function App() {
         radius,
         provider: provider.toLowerCase(),
       };
+
       setSiteMeta(meta);
 
-      // 3) Run YOLO AI model
-      const aiJson = await invoke<string>("run_ai_analysis", {
+      // -------------------------------------
+      // 3) RUN AI ANALYSIS
+      // -------------------------------------
+      const aiRaw = await invoke<string>("run_ai_analysis", {
         imageB64: stitchedTile,
+        sample_id: meta.sample_id,
+        model_size: "nano", // performance boost
       });
 
-      console.log("AI JSON:", aiJson);
+      console.log("AI Output (raw):", aiRaw?.slice(0, 500));
 
-      // Parse only the JSON line (filter out YOLO logs)
-      const lastJsonString = aiJson
+      // Some logs may be printed before JSON
+      const lastJsonLine = aiRaw
         .trim()
-        .split('\n')
-        .filter(l => l.trim().startsWith('{'))
+        .split("\n")
+        .filter((line) => line.trim().startsWith("{"))
         .pop();
-      
-      if (!lastJsonString) throw new Error("No JSON detected in AI output");
-      const parsed: AiResult = JSON.parse(lastJsonString);
 
-      const fullResult = {
+      if (!lastJsonLine) throw new Error("No JSON detected from AI pipeline.");
+
+      const parsed: AiResult = JSON.parse(lastJsonLine);
+
+      const fullResult: AiResult = {
         ...parsed,
         sample_id: meta.sample_id,
         lat: meta.lat,
         lon: meta.lon,
+        image_metadata: parsed.image_metadata ?? parsed.image_metadata,
       };
+
       setAiResult(fullResult);
 
-      // 4) Load annotated overlay image
+      // -------------------------------------
+      // 4) LOAD OVERLAY IMAGE IF AVAILABLE
+      // -------------------------------------
       if (parsed.audit_overlay_path) {
-        const overlayB64 = await invoke<string>("load_overlay_image", {
-          imagePath: parsed.audit_overlay_path,
-        });
-        setOverlayImageSrc(overlayB64);
+        try {
+          const overlayB64 = await invoke<string>("load_overlay_image", {
+            imagePath: parsed.audit_overlay_path,
+          });
 
-        // Save to audit overlays folder
+          if (overlayB64) {
+            setOverlayImageSrc(overlayB64);
+          } else {
+            console.warn("Overlay path exists, but loading failed.");
+          }
+        } catch (e) {
+          console.warn("Overlay load failed:", e);
+        }
+
+        // persist overlay into /Terralyte/detections
         await invoke("save_audit_overlay", {
           imagePath: parsed.audit_overlay_path,
           sampleId: meta.sample_id,
         });
       }
 
-      // 5) Auto-save JSON
+      // -------------------------------------
+      // 5) AUTO-SAVE JSON INTO /Terralyte/detections
+      // -------------------------------------
       await invoke("save_detection_json", {
         data: {
           ...fullResult,
@@ -104,18 +143,24 @@ export default function App() {
           provider,
         },
         filename: `detection_${meta.sample_id}.json`,
+        outDir: "/Terralyte/detections",
       });
 
-      // 6) Switch to results view
+      // -------------------------------------
+      // 6) SWAP TO RESULTS VIEW
+      // -------------------------------------
       setView("results");
     } catch (err) {
-      console.error("Fetch / AI failed:", err);
+      console.error("AI pipeline failed:", err);
       alert(`AI processing failed: ${err}`);
     } finally {
       setLoading(false);
     }
   };
 
+  // ================================
+  //        RESULTS VIEW
+  // ================================
   if (view === "results" && siteMeta && aiResult) {
     return (
       <ResultsView
@@ -128,6 +173,9 @@ export default function App() {
     );
   }
 
+  // ================================
+  //        SELECTION UI
+  // ================================
   return (
     <div className="flex h-screen w-screen bg-slate-950 text-white overflow-hidden min-w-0 min-h-0">
       <Sidebar

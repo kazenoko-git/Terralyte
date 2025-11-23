@@ -14096,5 +14096,56 @@
       "Bifacial Panels Detected"
     ],
     "embedding": []
+  },
+  {
+    "image_path": "/var/folders/tf/ggn2vm094bqgx_yrjng1yqbc0000gq/T/tmpj6c3_u1b.png",
+    "timestamp": "2025-11-23T18:09:56Z",
+    "confidence": 0.701523095369339,
+    "panel_count": 1166,
+    "area_sqm": 1981.6549931792038,
+    "capacity_kw": 285.35831901780534,
+    "has_solar": true,
+    "qc_notes": [
+      "Large Commercial Installation",
+      "Significant Panel Area Coverage",
+      "Ground-Mounted Array Detected",
+      "Tracker Systems Detected",
+      "Bifacial Panels Detected"
+    ],
+    "embedding": []
+  },
+  {
+    "image_path": "/var/folders/tf/ggn2vm094bqgx_yrjng1yqbc0000gq/T/tmp3n7ept9u.png",
+    "timestamp": "2025-11-23T18:10:58Z",
+    "confidence": 0.7141676247119904,
+    "panel_count": 5469,
+    "area_sqm": 9298.123500477695,
+    "capacity_kw": 1338.9297840687882,
+    "has_solar": true,
+    "qc_notes": [
+      "Large Commercial Installation",
+      "Significant Panel Area Coverage",
+      "Ground-Mounted Array Detected",
+      "Tracker Systems Detected",
+      "Bifacial Panels Detected"
+    ],
+    "embedding": []
+  },
+  {
+    "image_path": "/var/folders/tf/ggn2vm094bqgx_yrjng1yqbc0000gq/T/tmpqdvg976o.png",
+    "timestamp": "2025-11-23T18:11:50Z",
+    "confidence": 0.5970946202675501,
+    "panel_count": 4904,
+    "area_sqm": 8337.429141718514,
+    "capacity_kw": 1200.589796407466,
+    "has_solar": true,
+    "qc_notes": [
+      "Large Commercial Installation",
+      "Significant Panel Area Coverage",
+      "Ground-Mounted Array Detected",
+      "Tracker Systems Detected",
+      "Bifacial Panels Detected"
+    ],
+    "embedding": []
   }
 ]

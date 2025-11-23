@@ -5,11 +5,10 @@ use tauri::{command, Manager};
 use base64::{engine::general_purpose, Engine as _};
 use serde::{Deserialize, Serialize};
 use serde_json::{json, Value};
+
 use tauri_plugin_dialog;
 use tauri_plugin_fs;
 use tauri_plugin_shell;
-
-
 
 // ============================================================
 // DATA STRUCTURES
@@ -17,7 +16,6 @@ use tauri_plugin_shell;
 
 #[derive(Debug, Serialize, Deserialize)]
 struct SolarDetection {
-    // ADDED DEFAULTS TO ALL CSV/APP FIELDS
     #[serde(default)]
     sample_id: String,
 
@@ -38,9 +36,8 @@ struct SolarDetection {
     qc_notes: Vec<String>,
 
     #[serde(default)]
-    bbox_or_mask: Vec<Vec<Vec<f64>>>,
+    bbox_or_mask: serde_json::Value,
 
-    // THESE THREE MUST *ALSO* BE OPTIONAL
     #[serde(default)]
     zoom: u32,
 
@@ -57,7 +54,6 @@ struct SolarDetection {
     image_metadata: Option<ImageMetadata>,
 }
 
-
 #[derive(Debug, Serialize, Deserialize)]
 struct ImageMetadata {
     source: String,
@@ -72,13 +68,8 @@ struct CsvRow {
 }
 
 // ============================================================
-// PATH HELPERS (FLAT STRUCTURE)
+// PATH HELPERS
 // ============================================================
-//
-// src-tauri is inside project root
-// python scripts are in project root
-// audit_overlays, detections, tile_cache are in project root
-//
 
 fn get_paths() -> Result<(PathBuf, PathBuf), String> {
     let tauri_dir = env::current_dir().map_err(|e| e.to_string())?;
@@ -90,7 +81,6 @@ fn get_paths() -> Result<(PathBuf, PathBuf), String> {
     Ok((tauri_dir, project_root))
 }
 
-// System python
 fn py() -> PathBuf {
     PathBuf::from("/usr/local/bin/python3")
 }
@@ -98,6 +88,10 @@ fn py() -> PathBuf {
 // ============================================================
 // TAURI COMMANDS
 // ============================================================
+//
+// PATCHED: fetch_and_crop_tile and fetch_stitched_tile remain file-based.
+// PATCHED: run_ai_analysis *now passes BASE64 directly* to run_model.py
+//
 
 #[command]
 fn fetch_and_crop_tile(lat: f64, lon: f64, zoom: u32, radius: u32, provider: String)
@@ -184,28 +178,30 @@ fn fetch_stitched_tile(lat: f64, lon: f64, zoom: u32, radius: u32, provider: Str
     Ok(format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(bytes)))
 }
 
+// ============================================================
+// PATCHED: run_ai_analysis — NOW PASSES BASE64 DIRECTLY
+// ============================================================
 #[command]
 fn run_ai_analysis(image_b64: String) -> Result<String, String> {
+    use std::io::Write;
     let (_tauri_dir, project_root) = get_paths()?;
     let python_path = py();
 
-    let tmp = project_root.join("tmp_input.png");
     let script = project_root.join("run_model.py");
     let model = project_root.join("verifier2.pt");
 
-    fs::write(
-        &tmp,
-        general_purpose::STANDARD.decode(
-            image_b64.replace("data:image/png;base64,", "")
-        ).map_err(|e| e.to_string())?
-    ).map_err(|e| format!("Failed to write PNG: {e}"))?;
+    // --- WRITE BASE64 TO TEMP FILE ---
+    let input_path = project_root.join("tmp_input.b64");
+    fs::write(&input_path, image_b64.as_bytes())
+        .map_err(|e| format!("Failed to write tmp_input.b64: {}", e))?;
 
+    // --- PASS FILE PATH TO PYTHON ---
     let output = Command::new(&python_path)
         .arg(&script)
-        .arg(&tmp)
+        .arg(input_path.to_string_lossy().to_string()) // <-- file path
         .arg(&model)
         .output()
-        .map_err(|e| format!("Failed to run AI script: {e}"))?;
+        .map_err(|e| format!("Failed to run AI script: {}", e))?;
 
     let stdout = String::from_utf8_lossy(&output.stdout).to_string();
     let stderr = String::from_utf8_lossy(&output.stderr).to_string();
@@ -214,7 +210,6 @@ fn run_ai_analysis(image_b64: String) -> Result<String, String> {
         return Err(format!("AI script error: {}", stderr));
     }
 
-    // --- REAL JSON EXTRACTION FIX ---
     let start = stdout.find('{').ok_or("No JSON detected in AI output")?;
     let end = stdout.rfind('}').ok_or("Invalid JSON output")?;
     let json_str = &stdout[start..=end];
@@ -222,6 +217,11 @@ fn run_ai_analysis(image_b64: String) -> Result<String, String> {
     Ok(json_str.to_string())
 }
 
+
+
+// ============================================================
+// BATCH PROCESSING (unchanged except bbox/mask type fix above)
+// ============================================================
 
 #[command]
 fn process_csv_batch(
@@ -232,10 +232,8 @@ fn process_csv_batch(
 ) -> Result<Vec<SolarDetection>, String> {
     use csv::ReaderBuilder;
 
-    // Figure out paths
-    let (project_root, gui_dir) = get_paths()?;
+    let (_tauri_dir, project_root) = get_paths()?;
 
-    // Open CSV
     let mut reader = ReaderBuilder::new()
         .has_headers(true)
         .from_path(&csv_path)
@@ -246,7 +244,6 @@ fn process_csv_batch(
     for row in reader.deserialize() {
         let row: CsvRow = row.map_err(|e| format!("Bad CSV row: {}", e))?;
 
-        // Fetch stitched tile
         let tile_b64 = fetch_stitched_tile(
             row.lat,
             row.lon,
@@ -255,10 +252,8 @@ fn process_csv_batch(
             provider.clone(),
         )?;
 
-        // Run AI on that
         let ai_json = run_ai_analysis(tile_b64)?;
 
-        // Extract JSON line from stdout
         let json_line = ai_json
             .lines()
             .find(|l| l.trim().starts_with('{'))
@@ -268,7 +263,6 @@ fn process_csv_batch(
             serde_json::from_str(json_line)
                 .map_err(|e| format!("AI JSON parse error: {}", e))?;
 
-        // Fill metadata
         det.sample_id = row.sample_id;
         det.lat = row.lat;
         det.lon = row.lon;
@@ -282,30 +276,9 @@ fn process_csv_batch(
     Ok(results)
 }
 
-#[command]
-fn save_batch_results(
-    detections: Vec<SolarDetection>,
-    batch_name: String,
-) -> Result<String, String> {
-    let (_tauri_dir, project_root) = get_paths()?;
-
-    
-    let output_dir = project_root.join("batch_results");
-    std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
-    
-    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
-    let filename = format!("{}_{}.json", batch_name, timestamp);
-    let output_path = output_dir.join(&filename);
-    
-    let json_string = serde_json::to_string_pretty(&detections)
-        .map_err(|e| format!("Failed to serialize: {}", e))?;
-    
-    std::fs::write(&output_path, json_string)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
-    
-    Ok(output_path.to_string_lossy().to_string())
-}
-
+// ============================================================
+// FILE SAVERS
+// ============================================================
 
 #[command]
 fn load_overlay_image(image_path: String) -> Result<String, String> {
@@ -328,7 +301,6 @@ fn save_detection_json(data: serde_json::Value, filename: String) -> Result<Stri
 
     let path = dir.join(&filename);
 
-    // Normalize data: if it's an object → wrap it in an array
     let normalized = match data {
         serde_json::Value::Array(_) => data,
         serde_json::Value::Object(_) => serde_json::Value::Array(vec![data]),
@@ -343,7 +315,6 @@ fn save_detection_json(data: serde_json::Value, filename: String) -> Result<Stri
     Ok(path.display().to_string())
 }
 
-
 #[command]
 fn save_audit_overlay(image_path: String, sample_id: String) -> Result<String, String> {
     let (_tauri_dir, project_root) = get_paths()?;
@@ -351,12 +322,21 @@ fn save_audit_overlay(image_path: String, sample_id: String) -> Result<String, S
     let dir = project_root.join("audit_overlays");
     fs::create_dir_all(&dir).map_err(|e| e.to_string())?;
 
-    let filename = format!("audit_{}_{}.png", sample_id, chrono::Local::now().format("%Y%m%d_%H%M%S"));
+    let filename = format!(
+        "audit_{}_{}.png",
+        sample_id,
+        chrono::Local::now().format("%Y%m%d_%H%M%S")
+    );
+
     let out = dir.join(filename);
 
     fs::copy(&image_path, &out).map_err(|e| e.to_string())?;
     Ok(out.display().to_string())
 }
+
+// ============================================================
+// CACHE HELPERS
+// ============================================================
 
 #[command]
 fn clear_tile_cache() -> Result<String, String> {
@@ -398,6 +378,10 @@ fn get_cache_size() -> Result<u64, String> {
     Ok(total)
 }
 
+// ============================================================
+// TRAINING APPEND
+// ============================================================
+
 #[command]
 fn add_to_training_data(detection: SolarDetection) -> Result<String, String> {
     let (_tauri_dir, project_root) = get_paths()?;
@@ -427,13 +411,37 @@ fn add_to_training_data(detection: SolarDetection) -> Result<String, String> {
     Ok("Added".into())
 }
 
+#[command]
+fn save_batch_results(
+    detections: Vec<SolarDetection>,
+    batch_name: String,
+) -> Result<String, String> {
+    let (_tauri_dir, project_root) = get_paths()?;
+
+    let output_dir = project_root.join("batch_results");
+    std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
+
+    let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
+    let filename = format!("{}_{}.json", batch_name, timestamp);
+    let output_path = output_dir.join(&filename);
+
+    let json_string = serde_json::to_string_pretty(&detections)
+        .map_err(|e| format!("Failed to serialize: {}", e))?;
+
+    std::fs::write(&output_path, json_string)
+        .map_err(|e| format!("Failed to write file: {}", e))?;
+
+    Ok(output_path.to_string_lossy().to_string())
+}
+
+
 // ============================================================
-// MAIN
+// TAURI MAIN
 // ============================================================
 
 fn main() {
     tauri::Builder::default()
-    .plugin(tauri_plugin_dialog::init())
+        .plugin(tauri_plugin_dialog::init())
         .plugin(tauri_plugin_fs::init())
         .plugin(tauri_plugin_shell::init())
         .setup(|app| {
