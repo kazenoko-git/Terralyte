@@ -191,7 +191,7 @@ fn run_ai_analysis(image_b64: String) -> Result<String, String> {
 
     let tmp = project_root.join("tmp_input.png");
     let script = project_root.join("run_model.py");
-    let model = project_root.join("verifier1.pt");
+    let model = project_root.join("verifier2.pt");
 
     fs::write(
         &tmp,
@@ -200,13 +200,6 @@ fn run_ai_analysis(image_b64: String) -> Result<String, String> {
         ).map_err(|e| e.to_string())?
     ).map_err(|e| format!("Failed to write PNG: {e}"))?;
 
-    if !script.exists() {
-        return Err(format!("run_model.py missing: {}", script.display()));
-    }
-    if !model.exists() {
-        return Err(format!("Model file missing: {}", model.display()));
-    }
-
     let output = Command::new(&python_path)
         .arg(&script)
         .arg(&tmp)
@@ -214,15 +207,21 @@ fn run_ai_analysis(image_b64: String) -> Result<String, String> {
         .output()
         .map_err(|e| format!("Failed to run AI script: {e}"))?;
 
-    let stdout = String::from_utf8_lossy(&output.stdout);
-    let stderr = String::from_utf8_lossy(&output.stderr);
+    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
+    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
 
     if !output.status.success() {
         return Err(format!("AI script error: {}", stderr));
     }
 
-    Ok(stdout.to_string())
+    // --- REAL JSON EXTRACTION FIX ---
+    let start = stdout.find('{').ok_or("No JSON detected in AI output")?;
+    let end = stdout.rfind('}').ok_or("Invalid JSON output")?;
+    let json_str = &stdout[start..=end];
+
+    Ok(json_str.to_string())
 }
+
 
 #[command]
 fn process_csv_batch(
@@ -321,7 +320,7 @@ fn load_overlay_image(image_path: String) -> Result<String, String> {
 }
 
 #[command]
-fn save_detection_json(data: SolarDetection, filename: String) -> Result<String, String> {
+fn save_detection_json(data: serde_json::Value, filename: String) -> Result<String, String> {
     let (_tauri_dir, project_root) = get_paths()?;
 
     let dir = project_root.join("detections");
@@ -329,11 +328,21 @@ fn save_detection_json(data: SolarDetection, filename: String) -> Result<String,
 
     let path = dir.join(&filename);
 
-    let json_string = serde_json::to_string_pretty(&data).map_err(|e| e.to_string())?;
+    // Normalize data: if it's an object → wrap it in an array
+    let normalized = match data {
+        serde_json::Value::Array(_) => data,
+        serde_json::Value::Object(_) => serde_json::Value::Array(vec![data]),
+        _ => return Err("Invalid data type: expected object or array".into()),
+    };
+
+    let json_string = serde_json::to_string_pretty(&normalized)
+        .map_err(|e| format!("Failed to serialize: {}", e))?;
+
     fs::write(&path, json_string).map_err(|e| e.to_string())?;
 
     Ok(path.display().to_string())
 }
+
 
 #[command]
 fn save_audit_overlay(image_path: String, sample_id: String) -> Result<String, String> {

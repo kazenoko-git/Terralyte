@@ -1,0 +1,4 @@
+mode: predict
+task: detect
+name: yolo-quiet
+verbose: false

@@ -1,23 +1,53 @@
+#!/usr/bin/env python3
 import sys, os
 sys.path.append(os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
-from imagen import Imagen, crop_center
+from imagen import Imagen, crop_center, latlon_to_pixel_in_stitched
+from PIL import Image
+import argparse
+from pathlib import Path
 
-# Parse args
-lat = float(sys.argv[1])
-lon = float(sys.argv[2])
-zoom = int(sys.argv[3])
-radius = int(sys.argv[4])
-provider = sys.argv[5]
-crop = "--crop" in sys.argv  # Check for crop flag
+parser = argparse.ArgumentParser()
+parser.add_argument("lat", type=float)
+parser.add_argument("lon", type=float)
+parser.add_argument("zoom", type=int)
+parser.add_argument("radius", type=int)
+parser.add_argument("provider", type=str)
+parser.add_argument("--crop", action="store_true", help="crop to target lat/lon")
+parser.add_argument("--crop-size", type=int, default=640, help="final crop size (default 640)")
+parser.add_argument("--out", type=str, default=None, help="output filename")
 
-# Download tiles
-img = Imagen(provider=provider).getMegaStitchedTiles(lat, lon, zoom, radius)
+args = parser.parse_args()
+lat = args.lat
+lon = args.lon
+zoom = args.zoom
+radius = args.radius
+provider = args.provider
+crop = args.crop
+crop_size = args.crop_size
+out = args.out
 
-# Crop to center if requested (focus on target building)
+img = Imagen(provider=provider).getStitchedTiles(lat, lon, zoom, radius)
+
 if crop:
-    img = crop_center(img, 640, 640)
+    # compute pixel location within stitched image
+    px, py = latlon_to_pixel_in_stitched(lat, lon, zoom, radius, tile_size=256)
+    left = int(px - crop_size/2)
+    top = int(py - crop_size/2)
+    right = left + crop_size
+    bottom = top + crop_size
+    # clamp to image
+    w, h = img.size
+    left = max(0, min(left, w - crop_size))
+    top = max(0, min(top, h - crop_size))
+    right = left + crop_size
+    bottom = top + crop_size
+    img = img.crop((left, top, right, bottom))
+else:
+    # default center crop for convenience
+    img = crop_center(img, crop_width=crop_size, crop_height=crop_size)
 
-output = f"tile_{lat}_{lon}_{zoom}.png"
-img.save(output)
+if out is None:
+    out = f"tile_{lat}_{lon}_{zoom}.png"
 
-print(output)
+img.save(out)
+print(out)
