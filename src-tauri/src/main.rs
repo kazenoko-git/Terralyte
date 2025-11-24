@@ -86,34 +86,36 @@ fn py() -> PathBuf {
 }
 
 // ============================================================
-// TAURI COMMANDS
+// TILE FETCHERS (patched for /backend)
 // ============================================================
-//
-// PATCHED: fetch_and_crop_tile and fetch_stitched_tile remain file-based.
-// PATCHED: run_ai_analysis *now passes BASE64 directly* to run_model.py
-//
 
 #[command]
-fn fetch_and_crop_tile(lat: f64, lon: f64, zoom: u32, radius: u32, provider: String)
-    -> Result<String, String>
-{
+fn fetch_and_crop_tile(
+    lat: f64,
+    lon: f64,
+    zoom: u32,
+    radius: u32,
+    provider: String
+) -> Result<String, String> {
+
     let (_tauri_dir, project_root) = get_paths()?;
     let python_path = py();
 
-    let script_path = project_root.join("imagenRunner.py");
-    if !script_path.exists() {
-        return Err(format!("imagenRunner.py missing at {}", script_path.display()));
+    let script = project_root.join("backend").join("imagenRunner.py");
+    if !script.exists() {
+        return Err(format!("imagenRunner.py missing at {}", script.display()));
     }
 
     let output = Command::new(&python_path)
-        .current_dir(&project_root)
-        .arg(&script_path)
+        .current_dir(project_root.join("backend"))
+        .arg(script.to_string_lossy().to_string())
         .arg(lat.to_string())
         .arg(lon.to_string())
         .arg(zoom.to_string())
         .arg(radius.to_string())
         .arg(provider)
         .arg("--crop")
+        .arg("--crop-size").arg("640")
         .output()
         .map_err(|e| format!("Failed to spawn python: {e}"))?;
 
@@ -128,36 +130,40 @@ fn fetch_and_crop_tile(lat: f64, lon: f64, zoom: u32, radius: u32, provider: Str
         return Err("Python returned no path".into());
     }
 
-    let img_path = project_root.join(rel);
-    if !img_path.exists() {
-        return Err(format!("Image not found: {}", img_path.display()));
-    }
+    let img_path = project_root.join("backend").join(rel);
 
-    let bytes = fs::read(img_path).map_err(|e| e.to_string())?;
-    Ok(format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(bytes)))
+    let bytes = fs::read(&img_path).map_err(|e| e.to_string())?;
+    Ok("data:image/png;base64,".to_owned()
+        + &general_purpose::STANDARD.encode(bytes))
 }
 
 #[command]
-fn fetch_stitched_tile(lat: f64, lon: f64, zoom: u32, radius: u32, provider: String)
-    -> Result<String, String>
-{
+fn fetch_stitched_tile(
+    lat: f64,
+    lon: f64,
+    zoom: u32,
+    radius: u32,
+    provider: String
+) -> Result<String, String> {
+
     let (_tauri_dir, project_root) = get_paths()?;
     let python_path = py();
 
-    let script_path = project_root.join("imagenRunner.py");
-    if !script_path.exists() {
-        return Err(format!("imagenRunner.py missing: {}", script_path.display()));
+    let script = project_root.join("backend").join("imagenRunner.py");
+    if !script.exists() {
+        return Err(format!("imagenRunner.py missing at {}", script.display()));
     }
 
     let output = Command::new(&python_path)
-        .current_dir(&project_root)
-        .arg(&script_path)
+        .current_dir(project_root.join("backend"))
+        .arg(script.to_string_lossy().to_string())
         .arg(lat.to_string())
         .arg(lon.to_string())
         .arg(zoom.to_string())
         .arg(radius.to_string())
         .arg(provider)
         .arg("--crop")
+        .arg("--crop-size").arg("640")
         .output()
         .map_err(|e| format!("Failed to spawn python: {e}"))?;
 
@@ -172,50 +178,68 @@ fn fetch_stitched_tile(lat: f64, lon: f64, zoom: u32, radius: u32, provider: Str
         return Err("Python returned no path".into());
     }
 
-    let img_path = project_root.join(rel);
+    let img_path = project_root.join("backend").join(rel);
 
-    let bytes = fs::read(img_path).map_err(|e| e.to_string())?;
-    Ok(format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(bytes)))
+    let bytes = fs::read(&img_path).map_err(|e| e.to_string())?;
+    Ok("data:image/png;base64,".to_owned()
+        + &general_purpose::STANDARD.encode(bytes))
 }
 
 // ============================================================
-// PATCHED: run_ai_analysis — NOW PASSES BASE64 DIRECTLY
+// AI PIPELINE — run_model.py (patched for backend/ + model migration)
 // ============================================================
+
 #[command]
 fn run_ai_analysis(image_b64: String) -> Result<String, String> {
-    use std::io::Write;
     let (_tauri_dir, project_root) = get_paths()?;
     let python_path = py();
 
-    let script = project_root.join("run_model.py");
-    let model = project_root.join("verifier2.pt");
+    // models folder
+    let models_dir = project_root.join("models");
+    if !models_dir.exists() {
+        fs::create_dir_all(&models_dir).map_err(|e| e.to_string())?;
+    }
 
-    // --- WRITE BASE64 TO TEMP FILE ---
-    let input_path = project_root.join("tmp_input.b64");
+    // preferred weights path
+    let model = models_dir.join("verifier2.pt");
+
+    // migrate root-level model into /models
+    let root_model = project_root.join("verifier2.pt");
+    if root_model.exists() && !model.exists() {
+        fs::rename(&root_model, &model)
+            .map_err(|e| format!("Failed to move model to /models: {}", e))?;
+    }
+
+    if !model.exists() {
+        return Err("Missing model weights: models/verifier2.pt".into());
+    }
+
+    // write temp input
+    let input_path = project_root.join("backend").join("tmp_input.b64");
     fs::write(&input_path, image_b64.as_bytes())
         .map_err(|e| format!("Failed to write tmp_input.b64: {}", e))?;
 
-    // --- PASS FILE PATH TO PYTHON ---
+    let script = project_root.join("backend").join("run_model.py");
+
+    // run python
     let output = Command::new(&python_path)
-    .arg(&script)
-    .arg(input_path.to_string_lossy().to_string())
-    .arg(&model)
+        .current_dir(project_root.join("backend"))
+        .arg(script.to_string_lossy().to_string())
+        .arg(input_path.to_string_lossy().to_string())
+        .arg(model.to_string_lossy().to_string())
+        .env("GMAPS_KEY", env::var("GMAPS_TILE_KEY").unwrap_or_default())
+        .env("BING_KEY", env::var("BING_TILE_KEY").unwrap_or_default())
+        .output()
+        .map_err(|e| format!("Failed to run AI script: {}", e))?;
 
-    // 🔥 PASS ENV VARS TO PYTHON DIRECTLY
-    .env("GMAPS_KEY", std::env::var("GMAPS_TILE_KEY").unwrap_or_default())
-    .env("BING_KEY",  std::env::var("BING_TILE_KEY").unwrap_or_default())
-
-    .output()
-    .map_err(|e| format!("Failed to run AI script: {}", e))?;
-
-
-    let stdout = String::from_utf8_lossy(&output.stdout).to_string();
-    let stderr = String::from_utf8_lossy(&output.stderr).to_string();
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    let stderr = String::from_utf8_lossy(&output.stderr);
 
     if !output.status.success() {
         return Err(format!("AI script error: {}", stderr));
     }
 
+    // extract JSON from Python output
     let start = stdout.find('{').ok_or("No JSON detected in AI output")?;
     let end = stdout.rfind('}').ok_or("Invalid JSON output")?;
     let json_str = &stdout[start..=end];
@@ -223,10 +247,8 @@ fn run_ai_analysis(image_b64: String) -> Result<String, String> {
     Ok(json_str.to_string())
 }
 
-
-
 // ============================================================
-// BATCH PROCESSING (unchanged except bbox/mask type fix above)
+// BATCH PROCESSING
 // ============================================================
 
 #[command]
@@ -267,7 +289,7 @@ fn process_csv_batch(
 
         let mut det: SolarDetection =
             serde_json::from_str(json_line)
-                .map_err(|e| format!("AI JSON parse error: {}", e))?;
+                .map_err(|e| format!("JSON parse error: {}", e))?;
 
         det.sample_id = row.sample_id;
         det.lat = row.lat;
@@ -289,17 +311,16 @@ fn process_csv_batch(
 #[command]
 fn load_overlay_image(image_path: String) -> Result<String, String> {
     let path = PathBuf::from(&image_path);
-
     if !path.exists() {
         return Err(format!("Overlay missing: {}", image_path));
     }
-
     let bytes = fs::read(path).map_err(|e| e.to_string())?;
-    Ok(format!("data:image/png;base64,{}", general_purpose::STANDARD.encode(bytes)))
+    Ok("data:image/png;base64,".to_owned()
+        + &general_purpose::STANDARD.encode(bytes))
 }
 
 #[command]
-fn save_detection_json(data: serde_json::Value, filename: String) -> Result<String, String> {
+fn save_detection_json(data: Value, filename: String) -> Result<String, String> {
     let (_tauri_dir, project_root) = get_paths()?;
 
     let dir = project_root.join("detections");
@@ -308,16 +329,15 @@ fn save_detection_json(data: serde_json::Value, filename: String) -> Result<Stri
     let path = dir.join(&filename);
 
     let normalized = match data {
-        serde_json::Value::Array(_) => data,
-        serde_json::Value::Object(_) => serde_json::Value::Array(vec![data]),
-        _ => return Err("Invalid data type: expected object or array".into()),
+        Value::Array(_) => data,
+        Value::Object(_) => Value::Array(vec![data]),
+        _ => return Err("Invalid data type".into()),
     };
 
     let json_string = serde_json::to_string_pretty(&normalized)
-        .map_err(|e| format!("Failed to serialize: {}", e))?;
+        .map_err(|e| e.to_string())?;
 
     fs::write(&path, json_string).map_err(|e| e.to_string())?;
-
     Ok(path.display().to_string())
 }
 
@@ -335,13 +355,12 @@ fn save_audit_overlay(image_path: String, sample_id: String) -> Result<String, S
     );
 
     let out = dir.join(filename);
-
     fs::copy(&image_path, &out).map_err(|e| e.to_string())?;
     Ok(out.display().to_string())
 }
 
 // ============================================================
-// CACHE HELPERS
+// CACHE
 // ============================================================
 
 #[command]
@@ -385,7 +404,7 @@ fn get_cache_size() -> Result<u64, String> {
 }
 
 // ============================================================
-// TRAINING APPEND
+// TRAINING
 // ============================================================
 
 #[command]
@@ -417,29 +436,33 @@ fn add_to_training_data(detection: SolarDetection) -> Result<String, String> {
     Ok("Added".into())
 }
 
+// ============================================================
+// SAVE BATCH RESULTS
+// ============================================================
+
 #[command]
 fn save_batch_results(
     detections: Vec<SolarDetection>,
     batch_name: String,
 ) -> Result<String, String> {
+
     let (_tauri_dir, project_root) = get_paths()?;
 
     let output_dir = project_root.join("batch_results");
-    std::fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
+    fs::create_dir_all(&output_dir).map_err(|e| e.to_string())?;
 
     let timestamp = chrono::Local::now().format("%Y%m%d_%H%M%S");
     let filename = format!("{}_{}.json", batch_name, timestamp);
     let output_path = output_dir.join(&filename);
 
     let json_string = serde_json::to_string_pretty(&detections)
-        .map_err(|e| format!("Failed to serialize: {}", e))?;
+        .map_err(|e| e.to_string())?;
 
-    std::fs::write(&output_path, json_string)
-        .map_err(|e| format!("Failed to write file: {}", e))?;
+    fs::write(&output_path, json_string)
+        .map_err(|e| e.to_string())?;
 
     Ok(output_path.to_string_lossy().to_string())
 }
-
 
 // ============================================================
 // TAURI MAIN
